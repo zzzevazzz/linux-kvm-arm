@@ -4475,10 +4475,11 @@ F:	arch/s390/kvm/
 F:	drivers/s390/kvm/
 
 KERNEL VIRTUAL MACHINE (KVM) FOR ARM
-M:	Christoffer Dall <christofferdall@gmail.com>
+M:	Christoffer Dall <cdall@cs.columbia.edu>
 L:	kvmarm@lists.cs.columbia.edu
-W:	http://http://systems.cs.columbia.edu/projects/kvm-arm
-S:	Supported
+W:	http://systems.cs.columbia.edu/projects/kvm-arm
+S:	Maintained
+F:	arch/arm/include/uapi/asm/kvm*
 F:	arch/arm/include/asm/kvm*
 F:	arch/arm/kvm/
 
