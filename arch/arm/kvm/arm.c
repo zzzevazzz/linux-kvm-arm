@@ -56,6 +56,7 @@ static unsigned long hyp_default_vectors;
 
 /* Per-CPU variable containing the currently running vcpu. */
 static DEFINE_PER_CPU(struct kvm_vcpu *, kvm_arm_running_vcpu);
+static DEFINE_PER_CPU(struct perf_event *, kvm_arm_perf_events);
 
 /* The VMID used in the VTTBR */
 static atomic64_t kvm_vmid_gen = ATOMIC64_INIT(1);
@@ -341,8 +342,21 @@ void kvm_arch_vcpu_uninit(struct kvm_vcpu *vcpu)
 {
 }
 
+static struct perf_event_attr cc_hw_attr = {
+	.type		= PERF_TYPE_HARDWARE,
+	.config		= PERF_COUNT_HW_CPU_CYCLES,
+	.size		= sizeof(struct perf_event_attr),
+	.pinned		= 1,
+	.disabled	= 1,
+	.exclude_user	= 1,
+	.exclude_kernel	= 1,
+	.exclude_hv	= 0,
+};
+
 void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 {
+	struct perf_event *event = per_cpu(kvm_arm_perf_events, cpu);
+
 	vcpu->cpu = cpu;
 	vcpu->arch.vfp_host = this_cpu_ptr(kvm_host_vfp_state);
 
@@ -355,12 +369,31 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 	if (cpumask_test_and_clear_cpu(cpu, &vcpu->arch.require_dcache_flush))
 		flush_cache_all(); /* We'd really want v7_flush_dcache_all() */
 
+	/*
+	 * Load a cycle counter for Hyp mode
+	 */
+	if (!event) {
+		event = perf_event_create_kernel_counter(&cc_hw_attr, cpu,
+							 NULL, NULL, NULL);
+		if (IS_ERR(event))
+			kvm_err("cannot register perf event: %ld\n",
+				PTR_ERR(event));
+		else
+			per_cpu(kvm_arm_perf_events, cpu) = event;
+	}
+	perf_event_enable(per_cpu(kvm_arm_perf_events, cpu));
+
 	kvm_arm_set_running_vcpu(vcpu);
 }
 
 void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
 {
+	struct perf_event *event = per_cpu(kvm_arm_perf_events, vcpu->cpu);
+
 	kvm_arm_set_running_vcpu(NULL);
+
+	if (event)
+		perf_event_disable(event);
 }
 
 int kvm_arch_vcpu_ioctl_set_guest_debug(struct kvm_vcpu *vcpu,
@@ -668,41 +701,6 @@ static int kvm_vcpu_first_run_init(struct kvm_vcpu *vcpu)
 	return 0;
 }
 
-static void kvm_enable_hyp_ccount(void)
-{
-	unsigned long pmxevtyper, pmselr, pmcr, enable;
-
-	asm volatile("mrc p15, 0, %[dst], c9, c12, 5":
-		     [dst] "=r" (pmselr));
-	asm volatile("mcr p15, 0, %[src], c9, c12, 5": :
-		     [src] "r" (pmselr | 0x1f));
-
-	asm volatile("mrc p15, 0, %[dst], c9, c13, 1":
-		     [dst] "=r" (pmxevtyper));
-
-	pmxevtyper |= (1 << 27); /* enable hyp counting */
-
-	asm volatile("mcr p15, 0, %[src], c9, c13, 1": :
-		     [src] "r" (pmxevtyper));
-
-	asm volatile("mcr p15, 0, %[src], c9, c12, 5\n\t": :
-		     [src] "r" (pmselr));
-
-	asm volatile("mrc p15, 0, %[dst], c9, c12, 0":
-		     [dst] "=r" (pmcr));
-	if (pmcr & (1 << 3))
-		kvm_err("cycle counter divider 64 enabled\n");
-
-	pmcr |= 1;
-	asm volatile("mcr p15, 0, %[src], c9, c12, 0": :
-		     [src] "r" (pmcr));
-
-	/* Use PMCNTENSET to enable the cycle counter */
-	enable = (1 << 31);
-	asm volatile("mcr p15, 0, %[en], c9, c12, 1": :
-		     [en] "r" (enable));
-}
-
 static u32 kvm_read_ccounter(void)
 {
 	u32 val;
@@ -824,8 +822,6 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
 			kvm_vgic_sync_hwstate(vcpu);
 			continue;
 		}
-
-		kvm_enable_hyp_ccount();
 
 		/**************************************************************
 		 * Enter the guest
